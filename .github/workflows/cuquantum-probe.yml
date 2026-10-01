@@ -1,0 +1,55 @@
+# TEMPORARY probe, fork only: does QuEST's cuQuantum build run on a
+# simulated GPU? libcustatevec ships PTX only for sm_100, so the probe
+# simulates a B200.
+name: cuquantum probe
+on:
+  push:
+    branches: [cuquantum-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@main
+      - name: Setup simulated GPU
+        uses: pantheongpu/setup-pantheonsim@052a0ac31bf6ec72a471d51aae29b7cbd090c6bf # v0.1.1
+        with:
+          gpu: nvidia/b200
+          cuda-toolkit: '12.8'
+          library-path: false
+      - name: Get cuStateVec
+        run: |
+          python3 -m pip download --no-deps -q -d /tmp/cuq custatevec-cu12
+          cd /tmp/cuq && python3 -m zipfile -e custatevec_cu12-*.whl x
+          ln -s libcustatevec.so.1 /tmp/cuq/x/cuquantum/lib/libcustatevec.so
+          ls -la /tmp/cuq/x/cuquantum/lib /tmp/cuq/x/cuquantum/include
+          echo "CUQUANTUM_ROOT=/tmp/cuq/x/cuquantum" >> $GITHUB_ENV
+      - name: Configure CMake
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DQUEST_BUILD_TESTS=ON
+          -DQUEST_FLOAT_PRECISION=2 -DQUEST_ENABLE_DEPRECATED_API=OFF
+          -DQUEST_ENABLE_OMP=OFF -DQUEST_ENABLE_MPI=OFF
+          -DQUEST_ENABLE_CUDA=ON -DQUEST_ENABLE_CUQUANTUM=ON
+          -DCMAKE_CUDA_ARCHITECTURES=100 -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared
+          -DQUEST_TEST_TRY_ALL_DEPLOYMENTS=0 -DQUEST_TEST_MAX_NUM_QUBIT_PERMUTATIONS=10
+      - name: Compile
+        run: cmake --build build --parallel
+      - name: What the library links
+        run: |
+          ldd build/tests/tests | grep -i 'not found' || true
+          vgpu run ldd build/tests/tests | grep -i 'cuda\|cublas\|custatevec\|quest' || true
+          ldd /tmp/cuq/x/cuquantum/lib/libcustatevec.so.1 || true
+      - name: Report QuEST environment (traced)
+        continue-on-error: true
+        env:
+          VGPU_TRACE: '1'
+        run: timeout 600 vgpu run ./tests/tests "complex arithmetic" 2>&1 | tail -80
+        working-directory: build
+      - name: A first slice of unit tests
+        continue-on-error: true
+        env:
+          QUEST_TEST_MAX_NUM_QUBIT_PERMUTATIONS: '10'
+          QUEST_TEST_TRY_ALL_DEPLOYMENTS: '0'
+        run: timeout 1500 vgpu run ctest -j4 --output-on-failure -R "applyHadamard|applyPauliX|applyCompMatr1|calcExpecPauliStr|calcTotalProb" 2>&1 | tail -80
+        working-directory: build
